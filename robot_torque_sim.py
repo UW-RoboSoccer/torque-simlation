@@ -1,5 +1,25 @@
+"""
+Robot Torque Simulation
+
+This module provides a simulation framework for calculating maximum static torques
+in robotic joints, considering the mass and length of segments and their
+hierarchical structure. It allows for defining different scenarios with varying
+segment properties and outputs the results in a CSV file.
+
+Usage:
+    python robot_torque_sim.py [options]
+
+Options:
+    -h, --help          Show this help message and exit
+    -v, --version       Show version number and exit
+    -o, --output FILE   Specify output CSV file (default: results.csv)
+    -s, --scenario NAME Run simulation for specific scenario (default: all)
+"""
+
 import math
-import copy # To avoid modifying original definitions
+import copy
+import argparse
+import csv
 
 # --- Constants ---
 G = 9.81  # Acceleration due to gravity (m/s^2)
@@ -12,24 +32,24 @@ G = 9.81  # Acceleration due to gravity (m/s^2)
 # Adjust these values for your specific robot design range
 BASE_SEGMENT_DEFINITIONS = {
     # Torso/Pelvis - Often the root or split reference
-    "Pelvis": {"mass": 10.0, "length": 0.3}, # Acts as base for legs/upper body
-    "Torso":  {"mass": 15.0, "length": 0.5}, # Connects to Pelvis
+    "Pelvis": {"mass": 10.0, "length": 0.3},  # Acts as base for legs/upper body
+    "Torso": {"mass": 15.0, "length": 0.5},  # Connects to Pelvis
 
     # Head
-    "Head":   {"mass": 4.0, "length": 0.25}, # Connects to Torso
+    "Head": {"mass": 4.0, "length": 0.25},  # Connects to Torso
 
     # Arms (L/R) - Assuming symmetry for base values
     "UpperArm_L": {"mass": 2.5, "length": 0.3},
-    "Forearm_L":  {"mass": 1.8, "length": 0.28}, # Includes hand mass estimate
+    "Forearm_L": {"mass": 1.8, "length": 0.28},  # Includes hand mass estimate
     "UpperArm_R": {"mass": 2.5, "length": 0.3},
-    "Forearm_R":  {"mass": 1.8, "length": 0.28}, # Includes hand mass estimate
+    "Forearm_R": {"mass": 1.8, "length": 0.28},  # Includes hand mass estimate
 
     # Legs (L/R) - Assuming symmetry for base values
     "Thigh_L": {"mass": 8.0, "length": 0.45},
-    "Shin_L":  {"mass": 4.5, "length": 0.4}, # Includes foot mass estimate
-    "Foot_L": {"mass": 1.5, "length": 0.2}, # Foot length often more about contact, but needed for CoM calc if separate
+    "Shin_L": {"mass": 4.5, "length": 0.4},  # Includes foot mass estimate
+    "Foot_L": {"mass": 1.5, "length": 0.2},  # Foot length often more about contact, but needed for CoM calc if separate
     "Thigh_R": {"mass": 8.0, "length": 0.45},
-    "Shin_R":  {"mass": 4.5, "length": 0.4}, # Includes foot mass estimate
+    "Shin_R": {"mass": 4.5, "length": 0.4},  # Includes foot mass estimate
     "Foot_R": {"mass": 1.5, "length": 0.2},
 }
 
@@ -39,119 +59,141 @@ BASE_SEGMENT_DEFINITIONS = {
 # This defines the kinematic chain structure.
 JOINT_HIERARCHY = {
     # Torso -> Head connection
-    "Neck_Yaw":   {"parent_segment": "Torso", "child_segment": "Head"},
-    "Neck_Pitch": {"parent_segment": "Torso", "child_segment": "Head"}, # Shares segments, analysis is per-joint axis
+    "Neck_Yaw": {"parent_segment": "Torso", "child_segment": "Head"},
+    "Neck_Pitch": {"parent_segment": "Torso", "child_segment": "Head"},  # Shares segments, analysis is per-joint axis
 
     # Torso -> Arms connections
     "Shoulder_Pitch_L": {"parent_segment": "Torso", "child_segment": "UpperArm_L"},
-    "Shoulder_Roll_L":  {"parent_segment": "Torso", "child_segment": "UpperArm_L"},
-    "Shoulder_Yaw_L":   {"parent_segment": "Torso", "child_segment": "UpperArm_L"},
-    "Elbow_Pitch_L":    {"parent_segment": "UpperArm_L", "child_segment": "Forearm_L"},
+    "Shoulder_Roll_L": {"parent_segment": "Torso", "child_segment": "UpperArm_L"},
+    "Shoulder_Yaw_L": {"parent_segment": "Torso", "child_segment": "UpperArm_L"},
+    "Elbow_Pitch_L": {"parent_segment": "UpperArm_L", "child_segment": "Forearm_L"},
 
     "Shoulder_Pitch_R": {"parent_segment": "Torso", "child_segment": "UpperArm_R"},
-    "Shoulder_Roll_R":  {"parent_segment": "Torso", "child_segment": "UpperArm_R"},
-    "Shoulder_Yaw_R":   {"parent_segment": "Torso", "child_segment": "UpperArm_R"},
-    "Elbow_Pitch_R":    {"parent_segment": "UpperArm_R", "child_segment": "Forearm_R"},
+    "Shoulder_Roll_R": {"parent_segment": "Torso", "child_segment": "UpperArm_R"},
+    "Shoulder_Yaw_R": {"parent_segment": "Torso", "child_segment": "UpperArm_R"},
+    "Elbow_Pitch_R": {"parent_segment": "UpperArm_R", "child_segment": "Forearm_R"},
 
     # Pelvis -> Torso connection
-    "Waist_Joint":      {"parent_segment": "Pelvis", "child_segment": "Torso"}, # Simplification
+    "Waist_Joint": {"parent_segment": "Pelvis", "child_segment": "Torso"},  # Simplification
 
     # Pelvis -> Legs connections
-    "Hip_Yaw_L":    {"parent_segment": "Pelvis", "child_segment": "Thigh_L"},
-    "Hip_Pitch_L":  {"parent_segment": "Pelvis", "child_segment": "Thigh_L"},
-    "Hip_Roll_L":   {"parent_segment": "Pelvis", "child_segment": "Thigh_L"},
+    "Hip_Yaw_L": {"parent_segment": "Pelvis", "child_segment": "Thigh_L"},
+    "Hip_Pitch_L": {"parent_segment": "Pelvis", "child_segment": "Thigh_L"},
+    "Hip_Roll_L": {"parent_segment": "Pelvis", "child_segment": "Thigh_L"},
     "Knee_Pitch_L": {"parent_segment": "Thigh_L", "child_segment": "Shin_L"},
-    "Ankle_Pitch_L":{"parent_segment": "Shin_L", "child_segment": "Foot_L"},
+    "Ankle_Pitch_L": {"parent_segment": "Shin_L", "child_segment": "Foot_L"},
     "Ankle_Roll_L": {"parent_segment": "Shin_L", "child_segment": "Foot_L"},
 
-    "Hip_Yaw_R":    {"parent_segment": "Pelvis", "child_segment": "Thigh_R"},
-    "Hip_Pitch_R":  {"parent_segment": "Pelvis", "child_segment": "Thigh_R"},
-    "Hip_Roll_R":   {"parent_segment": "Pelvis", "child_segment": "Thigh_R"},
+    "Hip_Yaw_R": {"parent_segment": "Pelvis", "child_segment": "Thigh_R"},
+    "Hip_Pitch_R": {"parent_segment": "Pelvis", "child_segment": "Thigh_R"},
+    "Hip_Roll_R": {"parent_segment": "Pelvis", "child_segment": "Thigh_R"},
     "Knee_Pitch_R": {"parent_segment": "Thigh_R", "child_segment": "Shin_R"},
-    "Ankle_Pitch_R":{"parent_segment": "Shin_R", "child_segment": "Foot_R"},
+    "Ankle_Pitch_R": {"parent_segment": "Shin_R", "child_segment": "Foot_R"},
     "Ankle_Roll_R": {"parent_segment": "Shin_R", "child_segment": "Foot_R"},
 }
 
+# --- Classes and Calculation Functions ---
 
-# --- Calculation Functions ---
+from typing import Dict, List, Optional, Set
 
-# MODIFIED: Added depth parameter and print statements for debugging recursion
-def get_distal_segments(start_segment, segments_def, joint_hier, _depth=0, _visited_recursion=None):
-    """ Recursively find all segments distal to (further down the chain from) the start_segment. """
-    # Initialize visited set at the top level call
-    if _visited_recursion is None:
-        _visited_recursion = set()
-
-    # print(f"{'  '*_depth}DEBUG: get_distal_segments(start='{start_segment}', depth={_depth})") # Optional: Verbose trace
-
-    # --- Cycle Detection ---
-    if start_segment in _visited_recursion:
-        print(f"{'  '*_depth}ERROR: Cycle detected! Already visited '{start_segment}' in this recursion path. Aborting branch.")
-        return [] # Return empty list to prevent infinite loop
-    if _depth > len(segments_def) * 2: # Safety break for excessive depth
-        print(f"{'  '*_depth}ERROR: Max recursion depth exceeded for '{start_segment}'. Check hierarchy for cycles or extreme depth.")
-        return []
-
-    _visited_recursion.add(start_segment) # Mark current segment as visited for this path
-
-    distal_segments_set = set()
-    child_joints_segments = []
-    for joint_name, links in joint_hier.items():
-        if links['parent_segment'] == start_segment:
-            # Ensure child exists before adding
-            if links['child_segment'] in segments_def:
-                child_joints_segments.append(links['child_segment'])
-            # else: # Optional: Warn about undefined child segments in hierarchy
-            #     print(f"WARNING: Child segment '{links['child_segment']}' for parent '{start_segment}' (joint '{joint_name}') not in segment definitions.")
-
-    # Find unique children for this segment
-    unique_child_segments = list(set(child_joints_segments))
-
-    for child_seg in unique_child_segments:
-        # Add the direct child
-        distal_segments_set.add(child_seg)
-        # Recursively find segments distal to this child
-        # Pass a copy of the visited set for the recursive call specific to this branch
-        recursive_distal = get_distal_segments(child_seg, segments_def, joint_hier, _depth + 1, _visited_recursion.copy())
-        distal_segments_set.update(recursive_distal)
-
-    # Remove current segment from visited *after* exploring children (backtrack)
-    # Note: This might not be strictly necessary if we pass copies, but good practice.
-    # We passed copies, so modifying the original set isn't needed here.
-
-    # print(f"{'  '*_depth}DEBUG: Returning for '{start_segment}': {list(distal_segments_set)}") # Optional: Verbose trace
-    return list(distal_segments_set)
-
-# MODIFIED: Added extensive print statements for debugging progress and potential hangs
-def calculate_max_static_torques(segment_definitions, joint_hierarchy):
+class Robot:
     """
-    Calculates the maximum static holding torque for each joint.
-    Assumes worst-case horizontal extension of all distal segments.
+    Represents a robot with segments and joint hierarchy.
     """
-    print("    DEBUG: Entered calculate_max_static_torques.") # DEBUG
-    joint_torques = {}
-    processed_joints_count = 0 # DEBUG
-    joint_names_list = list(joint_hierarchy.keys()) # Get a list to track progress
 
-    for i, joint_name in enumerate(joint_names_list):
-        links = joint_hierarchy[joint_name]
-        print(f"\n      DEBUG: === Processing Joint {i+1}/{len(joint_names_list)}: {joint_name} ===") # DEBUG
-        parent_segment = links['parent_segment']
-        child_segment = links['child_segment']
+    def __init__(self, segments: Dict[str, Dict[str, float]], joint_hierarchy: Dict[str, Dict[str, str]]):
+        self.segments = segments
+        self.joint_hierarchy = joint_hierarchy
 
-        # --- Basic Sanity Checks ---
-        # Check if child segment exists (Critical!)
-        if child_segment not in segment_definitions:
-             print(f"      ERROR: Child segment '{child_segment}' for joint '{joint_name}' not in segment definitions. Skipping this joint.")
-             joint_torques[joint_name] = 0.0 # Assign 0 or handle error appropriately
-             continue # Skip this joint calculation
+    def get_distal_segments(self, start_segment: str, _depth: int = 0, _visited_recursion: Optional[Set[str]] = None) -> List[str]:
+        """
+        Recursively find all segments distal to (further down the chain from) the start_segment.
+        """
+        if _visited_recursion is None:
+            _visited_recursion = set()
+        if start_segment in _visited_recursion:
+            print(f"  {'  ' * _depth}ERROR: Cycle detected! Already visited '{start_segment}' in this recursion path. Aborting branch.")
+            return []
+        if _depth > len(self.segments) * 2:
+            print(f"  {'  ' * _depth}ERROR: Max recursion depth exceeded for '{start_segment}'. Check hierarchy for cycles or extreme depth.")
+            return []
+        _visited_recursion.add(start_segment)
+        distal_segments_set = set()
+        for joint_name, links in self.joint_hierarchy.items():
+            if links['parent_segment'] == start_segment:
+                child = links['child_segment']
+                distal_segments_set.add(child)
+                distal_segments_set.update(self.get_distal_segments(child, _depth=_depth + 1, _visited_recursion=_visited_recursion.copy()))
+        return list(distal_segments_set)
 
-        print(f"        DEBUG: Parent='{parent_segment}', Child='{child_segment}'. Finding distal segments for child.") # DEBUG
-        # Call the modified get_distal_segments
-        distal_segments_list = get_distal_segments(child_segment, segment_definitions, joint_hierarchy)
-        print(f"        DEBUG: Distal segments (relative to child '{child_segment}') found: {distal_segments_list}") # DEBUG
+    def calculate_max_static_torques(self) -> Dict[str, float]:
+        """
+        Calculates the maximum static holding torque for each joint.
+        Assumes worst-case horizontal extension of all distal segments.
+        """
+        max_torques = {}
+        for joint_name, links in self.joint_hierarchy.items():
+            parent = links['parent_segment']
+            child = links['child_segment']
+            distal_segments = self.get_distal_segments(child)
+            # The torque at this joint is the sum of torques from all distal segments
+            torque = 0.0
+            for segment in [child] + distal_segments:
+                seg_def = self.segments.get(segment)
+                if seg_def is None:
+                    print(f"  WARNING: Segment '{segment}' not found in definitions.")
+                    continue
+                mass = seg_def['mass']
+                length = seg_def['length']
+                # Assume center of mass at half the segment length
+                torque += mass * G * length / 2
+            max_torques[joint_name] = torque
+        return max_torques
 
-        # Segments whose CoM contributes to torque at this joint (child + all distal to child)
+class Simulation:
+    """
+    Handles running torque simulations for multiple robot configurations.
+    """
+
+    def __init__(self, base_segments: Dict[str, Dict[str, float]], joint_hierarchy: Dict[str, Dict[str, str]], variations: Dict[str, Dict[str, Dict[str, float]]]):
+        self.base_segments = base_segments
+        self.joint_hierarchy = joint_hierarchy
+        self.variations = variations
+        self.results = {}
+
+    def run(self, scenario: Optional[str] = None):
+        scenarios = [scenario] if scenario else list(self.variations.keys())
+        for name in scenarios:
+            print(f"\nRunning simulation for variation: {name}")
+            variation = self.variations[name]
+            # Deep copy base segments and apply variation
+            current_segments = copy.deepcopy(self.base_segments)
+            for seg, props in variation.items():
+                if seg not in current_segments:
+                    print(f"  WARNING: Segment '{seg}' not found in base definitions.")
+                    continue
+                current_segments[seg].update(props)
+            robot = Robot(current_segments, self.joint_hierarchy)
+            max_torques = robot.calculate_max_static_torques()
+            self.results[name] = max_torques
+            print(f"  Finished torque calculation for variation '{name}'.")
+
+    def save_results_csv(self, filename: str):
+        """
+        Save simulation results to a CSV file.
+        """
+        all_joints = set()
+        for torques in self.results.values():
+            all_joints.update(torques.keys())
+        all_joints = sorted(all_joints)
+        with open(filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            header = ['Scenario'] + all_joints
+            writer.writerow(header)
+            for scenario, torques in self.results.items():
+                row = [scenario] + [f"{torques.get(j, ''):.2f}" if j in torques else '' for j in all_joints]
+                writer.writerow(row)
+
         segments_to_consider = [child_segment] + distal_segments_list
         # Ensure all segments are valid before proceeding (should be guaranteed by get_distal_segments check now)
         segments_to_consider = list(set([s for s in segments_to_consider if s in segment_definitions])) # Use set for uniqueness, then list
@@ -354,45 +396,42 @@ SIMULATION_VARIATIONS = {
 }
 
 
-# --- Run Simulation ---
-print("Starting Simulation Runs...")
-simulation_results = run_simulation_range(
-    BASE_SEGMENT_DEFINITIONS,
-    JOINT_HIERARCHY,
-    SIMULATION_VARIATIONS
-)
-print("\nFinished All Simulation Runs.")
+# --- CLI and Main Execution ---
+def main():
+    parser = argparse.ArgumentParser(description='Robot Joint Torque Simulation')
+    parser.add_argument('--scenario', type=str, help='Name of the scenario to run (default: all)')
+    parser.add_argument('--csv', type=str, help='Output CSV file for results (optional)')
+    args = parser.parse_args()
 
-# --- Post-Processing (Example: Find Torque Ranges) ---
-print("\n--- Torque Ranges Across Simulations ---")
-all_torques_by_joint = {}
+    print("Starting Simulation Runs...")
+    sim = Simulation(BASE_SEGMENT_DEFINITIONS, JOINT_HIERARCHY, SIMULATION_VARIATIONS)
+    sim.run(args.scenario)
+    print("\nFinished All Simulation Runs.")
 
-# Initialize with all joints from the hierarchy
-for joint_name in JOINT_HIERARCHY.keys():
-    all_torques_by_joint[joint_name] = []
-
-# Populate with results
-for variation_name, torques in simulation_results.items():
-    for joint_name, torque_value in torques.items():
-        if joint_name in all_torques_by_joint:
-             all_torques_by_joint[joint_name].append(torque_value)
+    # --- Post-Processing (Torque Ranges) ---
+    print("\n--- Torque Ranges Across Simulations ---")
+    all_torques_by_joint = {joint: [] for joint in JOINT_HIERARCHY.keys()}
+    for variation_name, torques in sim.results.items():
+        for joint_name, torque_value in torques.items():
+            if joint_name in all_torques_by_joint:
+                all_torques_by_joint[joint_name].append(torque_value)
+            else:
+                print(f"WARNING: Joint '{joint_name}' found in results of '{variation_name}' but not in base hierarchy keys during range calculation. Adding it.")
+                all_torques_by_joint[joint_name] = [torque_value]
+    print("\nMax Static Torque Ranges (Min - Max) Nm:")
+    sorted_joints_final = sorted(all_torques_by_joint.keys())
+    for joint_name in sorted_joints_final:
+        torques_list = all_torques_by_joint[joint_name]
+        if torques_list:
+            min_torque = min(torques_list)
+            max_torque = max(torques_list)
+            print(f"  {joint_name:<18}: {min_torque:.2f} - {max_torque:.2f}")
         else:
-             # This might happen if a joint calculation was skipped due to an error earlier
-             print(f"WARNING: Joint '{joint_name}' found in results of '{variation_name}' but not in base hierarchy keys during range calculation. Adding it.")
-             all_torques_by_joint[joint_name] = [torque_value] # Initialize it here if missed
+            print(f"  {joint_name:<18}: No valid data calculated across variations.")
+    print("\nSimulation Complete.")
+    if args.csv:
+        sim.save_results_csv(args.csv)
+        print(f"Results saved to {args.csv}")
 
-
-print("\nMax Static Torque Ranges (Min - Max) Nm:")
-# Sort for consistent output
-sorted_joints_final = sorted(all_torques_by_joint.keys())
-for joint_name in sorted_joints_final:
-    torques_list = all_torques_by_joint[joint_name]
-    if torques_list:
-        min_torque = min(torques_list)
-        max_torque = max(torques_list)
-        print(f"  {joint_name:<18}: {min_torque:.2f} - {max_torque:.2f}")
-    else:
-        # This might happen if a joint consistently errored out in all variations
-        print(f"  {joint_name:<18}: No valid data calculated across variations.")
-
-print("\nSimulation Complete.")
+if __name__ == "__main__":
+    main()
